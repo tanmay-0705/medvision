@@ -1,0 +1,11 @@
+streamlit>=1.36
+pydicom>=2.4
+numpy>=1.26
+Pillow>=10.0
+opencv-python-headless>=4.9
+torch>=2.2
+torchvision>=0.17
+torchxrayvision>=1.2
+grad-cam>=1.5          
+reportlab>=4.0
+gemini
