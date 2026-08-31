@@ -1,0 +1,25 @@
+dicom viewer
+jpeg converter
+dicom image(ultrasound etc) analyser  using algo or llm etc
+any coding library that gives proper diagnosis and details for that image
+
+we need to create ai flow and to give the realistic data inside that image
+
+open ai api for ai analysis
+
+
+
+
+
+
+
+camping books,   into the wild
+real life story books,
+history books
+medicine type books
+
+
+
+3 body prob book
+lost city of z
+hyperion
