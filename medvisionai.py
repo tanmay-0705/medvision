@@ -378,6 +378,7 @@ def generate_report(findings: dict, metadata: dict) -> dict:
 
 
 # PDF REPORT BUILDER 
+
 def _pil_to_flowable(pil_img: Image.Image, max_width_in: float = 3.2) -> RLImage:
     buf = io.BytesIO()
     pil_img.save(buf, format="PNG")

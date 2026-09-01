@@ -8,4 +8,5 @@ torchvision>=0.17
 torchxrayvision>=1.2
 grad-cam>=1.5          
 reportlab>=4.0
-gemini
+google-genai
+python-dotenv
