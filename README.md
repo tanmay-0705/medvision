@@ -57,7 +57,7 @@ GEMINI_API_KEY=your_api_key_here
 Run:
 
 ```bash
-streamlit run medvisionai_all.py
+streamlit run main.py
 ```
 
 

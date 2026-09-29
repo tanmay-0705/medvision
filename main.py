@@ -4,8 +4,6 @@ from dotenv import load_dotenv
 
 load_dotenv(os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env"))
 
-api_key = os.getenv("GEMINI_API_KEY")
-
 
 import io
 import json
@@ -301,6 +299,17 @@ SYSTEM_PROMPT = (
 )
 
 
+def get_gemini_api_key() -> str:
+    api_key = os.getenv("GEMINI_API_KEY", "").strip()
+    if api_key:
+        return api_key
+
+    try:
+        return str(st.secrets.get("GEMINI_API_KEY", "")).strip()
+    except Exception:
+        return ""
+
+
 def _build_user_message(findings: dict, metadata: dict, top_n: int = 6) -> str:
     top_findings = dict(list(findings.items())[:top_n])
     payload = {
@@ -371,7 +380,7 @@ def describe_image_with_llm(pil_img: Image.Image) -> dict:
     non-diagnostic visual description. This is intentionally kept separate from
     generate_report()/run_inference(): it never sees or edits the DenseNet121 findings,
     and its output is never merged into st.session_state.findings or the guarded summary."""
-    api_key = os.getenv("GEMINI_API_KEY")
+    api_key = get_gemini_api_key()
 
     if not api_key or api_key == "your_api_key_here":
         return _fallback_vision_description()
@@ -445,7 +454,7 @@ def answer_followup_question(question: str, findings: dict, metadata: dict, llm_
     """Answers a user question about the already-generated report. Re-sends the report's own
     findings/summary/visual-impression as grounding context on every turn (stateless per call,
     matching the rest of this app's Gemini usage) plus the running conversation so far."""
-    api_key = os.getenv("GEMINI_API_KEY")
+    api_key = get_gemini_api_key()
 
     if not api_key or api_key == "your_api_key_here":
         return _fallback_chat_answer()
@@ -477,7 +486,7 @@ def answer_followup_question(question: str, findings: dict, metadata: dict, llm_
 
 
 def generate_report(findings: dict, metadata: dict) -> dict:
-    api_key = os.getenv("GEMINI_API_KEY")
+    api_key = get_gemini_api_key()
 
     if not api_key or api_key == "your_api_key_here":
         return _fallback_summary(findings, metadata)
@@ -840,9 +849,9 @@ def render_viewer():
 
         st.markdown("---")
         st.markdown("##### AI Analysis")
-        configured_api_key = os.getenv("GEMINI_API_KEY")
+        configured_api_key = get_gemini_api_key()
         if not configured_api_key or configured_api_key == "your_api_key_here":
-            st.warning("Gemini is not configured. Add a real GEMINI_API_KEY to the .env file beside mainvikas.py.")
+            st.warning("Gemini is not configured. Set GEMINI_API_KEY in your local .env file or in the deployed app's Streamlit Secrets.")
         for error_key, label in [
             ("_gemini_error", "Gemini report error"),
             ("_gemini_vision_error", "Gemini visual description error"),
@@ -886,7 +895,7 @@ def render_viewer():
                 st.caption("Highlighted region drove the top prediction above.")
 
             st.markdown("---")
-            with st.expander("🔬 AI Visual Impression (Experimental)"):
+            with st.expander("AI Visual Impression (Experimental)"):
                 st.caption(
                     "Sends the image itself to a vision-capable LLM (Gemini) for a plain-language "
                     "visual description. Unlike the findings above, this is **not** produced by the "
