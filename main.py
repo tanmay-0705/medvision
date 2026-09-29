@@ -2,7 +2,7 @@ import os
 from click import prompt
 from dotenv import load_dotenv
 
-load_dotenv()
+load_dotenv(os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env"))
 
 api_key = os.getenv("GEMINI_API_KEY")
 
@@ -324,7 +324,7 @@ def _fallback_summary(findings: dict, metadata: dict, top_n: int = 6) -> dict:
             f"at {highest_p*100:.0f}% model confidence." 
         ),
         "possible_findings": [name for name, _ in top],
-        '''"severity": "Not assessed -- set GEMINI_API_KEY for a proper severity read",'''
+        "severity": "Not assessed -- set GEMINI_API_KEY for a proper severity read",
         "confidence_note": f"Top signal: {top_str}" if top else "No findings above threshold",
         "recommended_next_steps": [
             "Clinical correlation with patient history required",
@@ -339,10 +339,147 @@ def _guard_against_hallucination(parsed: dict, findings: dict) -> dict:
     return parsed
 
 
+# 5b. AI VISUAL IMPRESSION -- EXPERIMENTAL, IMAGE-DIRECT (separate from the guarded findings above)
+
+VISION_SYSTEM_PROMPT = (
+    "You are describing the visual appearance of a chest X-ray image for a "
+    "radiologist's quick reference. You are not diagnosing and you are not "
+    "the validated detection model -- your output is a separate, exploratory "
+    "visual impression only. Describe only what is visually observable "
+    "(positioning, symmetry, density, notable shadows or opacities, visible "
+    "devices/lines if any) in plain, hedged language. Never state or imply a "
+    "diagnosis, never assign a probability or confidence percentage, and "
+    "never claim a finding is present with certainty. If the image quality "
+    "or positioning limits what can be said, say so plainly. Respond ONLY "
+    "with valid JSON, no markdown fences, no preamble, in exactly this "
+    "shape: "
+    '{"visual_observations": [str], "limitations": str}'
+)
+
+
+def _fallback_vision_description() -> dict:
+    return {
+        "visual_observations": [
+            "AI visual description unavailable -- set GEMINI_API_KEY to enable this experimental feature."
+        ],
+        "limitations": "No image-direct analysis was run for this image.",
+    }
+
+
+def describe_image_with_llm(pil_img: Image.Image) -> dict:
+    """Send the rendered image directly to a vision-capable LLM for a plain-language,
+    non-diagnostic visual description. This is intentionally kept separate from
+    generate_report()/run_inference(): it never sees or edits the DenseNet121 findings,
+    and its output is never merged into st.session_state.findings or the guarded summary."""
+    api_key = os.getenv("GEMINI_API_KEY")
+
+    if not api_key or api_key == "your_api_key_here":
+        return _fallback_vision_description()
+
+    try:
+        from google import genai
+
+        client = genai.Client(api_key=api_key)
+
+        buf = io.BytesIO()
+        pil_img.convert("RGB").save(buf, format="JPEG", quality=92)
+        image_bytes = buf.getvalue()
+
+        response = client.models.generate_content(
+            model="gemini-2.5-flash",
+            contents=[
+                {"inline_data": {"mime_type": "image/jpeg", "data": image_bytes}},
+                "Describe the visual appearance of this chest X-ray image.",
+            ],
+            config={
+                "system_instruction": VISION_SYSTEM_PROMPT,
+                "response_mime_type": "application/json",
+                "max_output_tokens": 1024,
+            },
+        )
+
+        parsed = json.loads(response.text)
+        parsed.setdefault("visual_observations", [])
+        parsed.setdefault("limitations", "")
+        return parsed
+
+    except Exception as e:
+        st.session_state["_gemini_vision_error"] = f"{type(e).__name__}: {e}"
+        return _fallback_vision_description()
+
+
+# 5c. FOLLOW-UP CHAT -- scoped strictly to what's already on screen (findings, summary, visual impression)
+
+CHAT_SYSTEM_PROMPT = (
+    "You are answering follow-up questions about a chest X-ray screening report "
+    "that has already been generated. You may only discuss, clarify, or explain "
+    "the structured findings, AI-generated summary, and visual impression given "
+    "to you below -- treat them as your only source of truth. Do not introduce "
+    "any new finding, diagnosis, probability, or recommendation that isn't "
+    "already present in that material. If the user asks something the given "
+    "report material does not cover (a new symptom, a treatment question, "
+    "anything requiring information you were not given), say plainly that it's "
+    "outside what this report covers and suggest they raise it with the "
+    "reviewing clinician instead of answering from general knowledge. Keep "
+    "answers short and in plain language."
+)
+
+
+def _build_chat_context(findings: dict, metadata: dict, llm_report: dict, vision_description: dict) -> str:
+    top_findings = dict(list(findings.items())[:8]) if findings else {}
+    payload = {
+        "modality": metadata.get("Modality", "N/A"),
+        "findings_with_confidence": {k: round(v, 3) for k, v in top_findings.items()},
+        "ai_summary": llm_report or {},
+        "ai_visual_impression": (vision_description or {}).get("visual_observations", []),
+    }
+    return "Report material (the only source of truth for this conversation):\n" + json.dumps(payload, indent=2)
+
+
+def _fallback_chat_answer() -> str:
+    return "Follow-up chat is unavailable -- set GEMINI_API_KEY to enable this experimental feature."
+
+
+def answer_followup_question(question: str, findings: dict, metadata: dict, llm_report: dict,
+                              vision_description: dict, chat_history: list) -> str:
+    """Answers a user question about the already-generated report. Re-sends the report's own
+    findings/summary/visual-impression as grounding context on every turn (stateless per call,
+    matching the rest of this app's Gemini usage) plus the running conversation so far."""
+    api_key = os.getenv("GEMINI_API_KEY")
+
+    if not api_key or api_key == "your_api_key_here":
+        return _fallback_chat_answer()
+
+    try:
+        from google import genai
+
+        client = genai.Client(api_key=api_key)
+
+        context = _build_chat_context(findings, metadata, llm_report, vision_description)
+        contents = [context]
+        for turn in chat_history:
+            contents.append(f"{turn['role'].capitalize()}: {turn['content']}")
+        contents.append(f"User: {question}")
+
+        response = client.models.generate_content(
+            model="gemini-2.5-flash",
+            contents="\n\n".join(contents),
+            config={
+                "system_instruction": CHAT_SYSTEM_PROMPT,
+                "max_output_tokens": 512,
+            },
+        )
+        return response.text.strip()
+
+    except Exception as e:
+        st.session_state["_gemini_chat_error"] = f"{type(e).__name__}: {e}"
+        return _fallback_chat_answer()
+
+
 def generate_report(findings: dict, metadata: dict) -> dict:
     api_key = os.getenv("GEMINI_API_KEY")
 
-    if not api_key:
+    if not api_key or api_key == "your_api_key_here":
         return _fallback_summary(findings, metadata)
 
     try:
@@ -367,7 +504,7 @@ def generate_report(findings: dict, metadata: dict) -> dict:
         return _guard_against_hallucination(parsed, findings)
 
     except Exception as e:
-        st.session_state["_gemini_error"] = str(e)
+        st.session_state["_gemini_error"] = f"{type(e).__name__}: {e}"
         st.session_state["_gemini_raw"] = locals().get("raw_text", "N/A")
         return _fallback_summary(findings, metadata)
 
@@ -389,11 +526,13 @@ def _pil_to_flowable(pil_img: Image.Image, max_width_in: float = 3.2) -> RLImage
 
 
 def build_report_pdf(output_path, original_image, gradcam_image, findings, metadata,
-                      llm_report, top_n: int = 8) -> str:
+                      llm_report, vision_description=None, top_n: int = 8) -> str:
     styles = getSampleStyleSheet()
     title_style = ParagraphStyle("TitleX", parent=styles["Title"], fontSize=18, spaceAfter=4)
     sub_style = ParagraphStyle("SubX", parent=styles["Normal"], textColor=colors.grey, fontSize=9)
     h2_style = ParagraphStyle("H2X", parent=styles["Heading2"], spaceBefore=14, spaceAfter=6)
+    h2_experimental_style = ParagraphStyle("H2ExpX", parent=styles["Heading2"], spaceBefore=14,
+                                            spaceAfter=6, textColor=colors.HexColor("#b45309"))
     body_style = ParagraphStyle("BodyX", parent=styles["Normal"], fontSize=10, leading=14)
     disclaimer_style = ParagraphStyle("DisclaimerX", parent=styles["Normal"], fontSize=8,
                                        textColor=colors.grey, leading=11)
@@ -460,6 +599,21 @@ def build_report_pdf(output_path, original_image, gradcam_image, findings, metad
         for s in steps:
             story.append(Paragraph(f"&bull; {s}", body_style))
 
+    if vision_description and vision_description.get("visual_observations"):
+        story.append(Paragraph("AI Visual Impression (Experimental)", h2_experimental_style))
+        story.append(Paragraph(
+            "Generated by sending the image directly to a vision-capable LLM. Unlike the "
+            "findings and summary above, this is not produced by the validated DenseNet121 "
+            "model and is not checked against it -- treat as an exploratory second opinion only.",
+            disclaimer_style
+        ))
+        story.append(Spacer(1, 4))
+        for obs in vision_description.get("visual_observations", []):
+            story.append(Paragraph(f"&bull; {obs}", body_style))
+        if vision_description.get("limitations"):
+            story.append(Spacer(1, 4))
+            story.append(Paragraph(f"<b>Limitations:</b> {vision_description['limitations']}", body_style))
+
     story.append(Paragraph("Doctor's Notes", h2_style))
     story.append(Table([[""]], colWidths=[6.8 * inch], rowHeights=[70],
                         style=TableStyle([("BOX", (0, 0), (-1, -1), 0.6, colors.grey)])))
@@ -483,27 +637,27 @@ ensure_samples_exist()
 def inject_css():
     st.markdown("""
     <style>
-    .stApp { background-color: #0a0e14; color: #e6edf3; }
-    section[data-testid="stSidebar"] { background-color: #0d1117; border-right: 1px solid #1c2333; }
-    .brand { font-weight:700; font-size:1.1rem; color:#e6edf3; }
-    .brand span { color:#3b82f6; }
-    .badge { color:#7d8590; font-size:0.75rem; letter-spacing:0.05em; }
-    .hero-label { color:#3b82f6; letter-spacing:0.12em; font-size:0.75rem; font-weight:600; }
-    .hero-title { font-size:2.6rem; font-weight:800; line-height:1.15; margin:10px 0 16px 0; }
-    .hero-sub { color:#9aa4b2; font-size:1.05rem; max-width:640px; line-height:1.6; }
-    .stat-box { border:1px solid #1c2333; border-radius:10px; padding:14px 18px; background:#0d1117; }
-    .stat-label { color:#7d8590; font-size:0.72rem; letter-spacing:0.08em; }
-    .stat-value { color:#e6edf3; font-weight:700; font-size:1rem; margin-top:4px; }
-    .stage-card { border:1px solid #1c2333; border-radius:12px; padding:20px; background:#0d1117; height:100%; }
-    .stage-num { color:#3b82f6; font-size:0.75rem; font-weight:700; }
-    .stage-title { font-size:1.15rem; font-weight:700; margin:8px 0; }
-    .stage-body { color:#9aa4b2; font-size:0.9rem; line-height:1.5; }
-    .dropbox { border:1.5px dashed #2a3347; border-radius:12px; padding:28px; background:#0d1117; text-align:center; }
-    .meta-row { display:flex; justify-content:space-between; padding:4px 0; border-bottom:1px solid #161c28; font-size:0.85rem; }
-    .meta-key { color:#7d8590; }
-    .meta-val { color:#e6edf3; }
-    div.stButton > button { background-color:#3b82f6; color:white; border:none; border-radius:8px; padding:0.5rem 1.1rem; font-weight:600; }
-    div.stButton > button:hover { background-color:#2563eb; color:white; }
+    .stApp { background-color: #0B1F2A; color: #E4EDEF; }
+    section[data-testid="stSidebar"] { background-color: #0A1922; border-right: 1px solid #17323F; }
+    .brand { font-weight:700; font-size:1.1rem; color:#E4EDEF; }
+    .brand span { color:#02C39A; }
+    .badge { color:#8FA3AA; font-size:0.75rem; letter-spacing:0.05em; }
+    .hero-label { color:#02C39A; letter-spacing:0.12em; font-size:0.75rem; font-weight:600; }
+    .hero-title { font-size:2.6rem; font-weight:800; line-height:1.15; margin:10px 0 16px 0; color:#F4F8F8; }
+    .hero-sub { color:#9FB4BA; font-size:1.05rem; max-width:640px; line-height:1.6; }
+    .stat-box { border:1px solid #17323F; border-radius:10px; padding:14px 18px; background:#0F2530; }
+    .stat-label { color:#8FA3AA; font-size:0.72rem; letter-spacing:0.08em; }
+    .stat-value { color:#02C39A; font-weight:700; font-size:1rem; margin-top:4px; }
+    .stage-card { border:1px solid #17323F; border-radius:12px; padding:20px; background:#0F2530; height:100%; }
+    .stage-num { color:#02C39A; font-size:0.75rem; font-weight:700; }
+    .stage-title { font-size:1.15rem; font-weight:700; margin:8px 0; color:#F4F8F8; }
+    .stage-body { color:#9FB4BA; font-size:0.9rem; line-height:1.5; }
+    .dropbox { border:1.5px dashed #1F4552; border-radius:12px; padding:28px; background:#0F2530; text-align:center; }
+    .meta-row { display:flex; justify-content:space-between; padding:4px 0; border-bottom:1px solid #14262F; font-size:0.85rem; }
+    .meta-key { color:#8FA3AA; }
+    .meta-val { color:#E4EDEF; }
+    div.stButton > button { background-color:#028090; color:white; border:none; border-radius:8px; padding:0.5rem 1.1rem; font-weight:600; }
+    div.stButton > button:hover { background-color:#02C39A; color:#0B1F2A; }
     </style>
     """, unsafe_allow_html=True)
 
@@ -514,6 +668,7 @@ inject_css()
 for key, default in [
     ("page", "home"), ("ds", None), ("source_name", None), ("pixel_array", None),
     ("findings", None), ("gradcam_img", None), ("llm_summary", None), ("_pdf_bytes", None),
+    ("vision_description", None), ("chat_history", []),
 ]:
     if key not in st.session_state:
         st.session_state[key] = default
@@ -532,6 +687,8 @@ def load_into_state(file_like, name):
     st.session_state.gradcam_img = None
     st.session_state.llm_summary = None
     st.session_state._pdf_bytes = None
+    st.session_state.vision_description = None
+    st.session_state.chat_history = []
     st.session_state.page = "viewer"
 
 
@@ -572,8 +729,8 @@ def render_home():
         if st.button("Open the viewer →", use_container_width=True):
             go("viewer")
     with c2:
-        st.markdown('<div style="border:1px solid #2a3347;border-radius:8px;padding:0.5rem 1.1rem;'
-                    'text-align:center;color:#9aa4b2;">How it works</div>', unsafe_allow_html=True)
+        st.markdown('<div style="border:1px solid #1F4552;border-radius:8px;padding:0.5rem 1.1rem;'
+                    'text-align:center;color:#9FB4BA;">How it works</div>', unsafe_allow_html=True)
 
     st.write("")
     st.write("")
@@ -606,9 +763,9 @@ def render_home():
     st.write("")
     st.write("")
     st.markdown(
-        '<div style="border-top:1px solid #1c2333; padding-top:18px;">'
+        '<div style="border-top:1px solid #17323F; padding-top:18px;">'
         '<b>Load a study and see the pipeline run</b><br>'
-        '<span style="color:#9aa4b2;font-size:0.85rem;">3 synthetic sample studies are bundled '
+        '<span style="color:#9FB4BA;font-size:0.85rem;">3 synthetic sample studies are bundled '
         'below if you don\'t have a .dcm file to hand.</span></div>', unsafe_allow_html=True)
     if st.button("Start →"):
         go("viewer")
@@ -623,7 +780,7 @@ def render_viewer():
         st.markdown('<div class="dropbox">', unsafe_allow_html=True)
         uploaded = st.file_uploader("Drop a .dcm file or click to browse", type=None,
                                      accept_multiple_files=False, label_visibility="collapsed")
-        st.markdown('<div style="color:#7d8590;font-size:0.8rem;margin-top:8px;">'
+        st.markdown('<div style="color:#8FA3AA;font-size:0.8rem;margin-top:8px;">'
                     'Works with .dcm and extensionless files. Nothing leaves this machine.</div></div>',
                     unsafe_allow_html=True)
 
@@ -648,7 +805,7 @@ def render_viewer():
         ds = st.session_state.ds
         if ds is None:
             st.markdown('<div style="display:flex;align-items:center;justify-content:center;height:400px;'
-                        'border:1px solid #1c2333;border-radius:12px;color:#7d8590;">'
+                        'border:1px solid #17323F;border-radius:12px;color:#8FA3AA;">'
                         'No study loaded yet — upload a file or pick a sample on the left.</div>',
                         unsafe_allow_html=True)
             return
@@ -683,6 +840,16 @@ def render_viewer():
 
         st.markdown("---")
         st.markdown("##### AI Analysis")
+        configured_api_key = os.getenv("GEMINI_API_KEY")
+        if not configured_api_key or configured_api_key == "your_api_key_here":
+            st.warning("Gemini is not configured. Add a real GEMINI_API_KEY to the .env file beside mainvikas.py.")
+        for error_key, label in [
+            ("_gemini_error", "Gemini report error"),
+            ("_gemini_vision_error", "Gemini visual description error"),
+            ("_gemini_chat_error", "Gemini chat error"),
+        ]:
+            if st.session_state.get(error_key):
+                st.error(f"{label}: {st.session_state[error_key]}")
         run_col, _ = st.columns([1, 3])
         with run_col:
             run_clicked = st.button("Run Analysis", use_container_width=True)
@@ -691,11 +858,16 @@ def render_viewer():
             with st.spinner("Loading model (first run downloads pretrained weights) and scoring..."):
                 cached_model()
                 findings = run_inference(raw)
+                if not findings:
+                    st.error("The model returned no findings, so Grad-CAM and report generation cannot continue.")
+                    st.stop()
                 st.session_state.findings = findings
                 top_idx = get_model().pathologies.index(list(findings.keys())[0])
                 overlay = generate_gradcam_overlay(raw, top_idx)
                 st.session_state.gradcam_img = Image.fromarray(overlay)
                 st.session_state.llm_summary = None
+                st.session_state.vision_description = None
+                st.session_state.chat_history = []
 
         if st.session_state.findings:
             fc1, fc2 = st.columns([1.3, 1])
@@ -714,6 +886,26 @@ def render_viewer():
                 st.caption("Highlighted region drove the top prediction above.")
 
             st.markdown("---")
+            with st.expander("🔬 AI Visual Impression (Experimental)"):
+                st.caption(
+                    "Sends the image itself to a vision-capable LLM (Gemini) for a plain-language "
+                    "visual description. Unlike the findings above, this is **not** produced by the "
+                    "validated DenseNet121 model and is **not** checked by the hallucination guard "
+                    "-- treat it as an exploratory second opinion only, not a finding."
+                )
+                describe_clicked = st.button("Describe Image with AI", key="describe_image_btn")
+                if describe_clicked:
+                    with st.spinner("Sending image to Gemini for a visual description..."):
+                        st.session_state.vision_description = describe_image_with_llm(img)
+
+                if st.session_state.vision_description:
+                    vd = st.session_state.vision_description
+                    for obs in vd.get("visual_observations", []):
+                        st.markdown(f"- {obs}")
+                    if vd.get("limitations"):
+                        st.caption(f"Limitations: {vd['limitations']}")
+
+            st.markdown("---")
             st.markdown("##### Report")
             
             pdf_col, _ = st.columns([1, 3])
@@ -727,7 +919,8 @@ def render_viewer():
                     st.session_state.llm_summary = report
                     tmp_path = os.path.join(tempfile.gettempdir(), f"medvisionai_report_{frame_idx}.pdf")
                     build_report_pdf(tmp_path, original_image=img, gradcam_image=st.session_state.gradcam_img,
-                                    findings=st.session_state.findings, metadata=meta, llm_report=report)
+                                    findings=st.session_state.findings, metadata=meta, llm_report=report,
+                                    vision_description=st.session_state.vision_description)
                     with open(tmp_path, "rb") as f:
                         st.session_state._pdf_bytes = f.read()
 
@@ -735,6 +928,31 @@ def render_viewer():
                 st.success("Report ready")
                 st.download_button("Download PDF Report", data=st.session_state._pdf_bytes,
                                     file_name="medvisionai_report.pdf", mime="application/pdf")
+
+            st.markdown("---")
+            st.markdown("##### Ask About This Report")
+            st.caption(
+                "Answers are scoped to the findings, summary, and visual impression already "
+                "shown above it won't introduce new findings or diagnoses."
+            )
+            for turn in st.session_state.chat_history:
+                with st.chat_message(turn["role"]):
+                    st.write(turn["content"])
+
+            user_question = st.chat_input("Ask a question about this report...")
+            if user_question:
+                st.session_state.chat_history.append({"role": "user", "content": user_question})
+                with st.spinner("Thinking..."):
+                    answer = answer_followup_question(
+                        user_question,
+                        st.session_state.findings,
+                        extract_metadata(ds),
+                        st.session_state.llm_summary,
+                        st.session_state.vision_description,
+                        st.session_state.chat_history[:-1],
+                    )
+                st.session_state.chat_history.append({"role": "assistant", "content": answer})
+                st.rerun()
         else:
             st.caption("Click **Run Analysis** to score this slide and unlock the PDF report step.")
 
