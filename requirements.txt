@@ -12,3 +12,6 @@ grad-cam
 reportlab
 google-genai
 python-dotenv
+fastapi
+uvicorn[standard]
+gunicorn
