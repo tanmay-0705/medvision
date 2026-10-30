@@ -17,12 +17,12 @@ import streamlit as st
 from PIL import Image
 
 # Must be the first Streamlit command.
-st.set_page_config(page_title="MedVisionAI", layout="wide", page_icon="🩺")
+st.set_page_config(page_title="MedVisionAI", layout="wide", page_icon="")
 
 APP_DIR = os.path.dirname(os.path.abspath(__file__))
 try:
     from dotenv import load_dotenv
-
+    
     load_dotenv(os.path.join(APP_DIR, ".env"))
 except ImportError:  # python-dotenv is optional (e.g. in the cloud, env vars are set directly)
     pass
@@ -896,9 +896,9 @@ def render_home():
     c1, c2, _ = st.columns([1.3, 1.3, 4])
     with c1:
         st.button("Open the viewer →", on_click=go, args=("viewer",))
-    with c2:
-        st.markdown('<div style="border:1px solid #1F4552;border-radius:8px;padding:0.5rem 1.1rem;'
-                    'text-align:center;color:#9FB4BA;">How it works</div>', unsafe_allow_html=True)
+    #with c2:
+     #   st.markdown('<div style="border:1px solid #1F4552;border-radius:8px;padding:0.5rem 1.1rem;'
+      #              'text-align:center;color:#9FB4BA;">How it works</div>', unsafe_allow_html=True)'''
 
     st.write("")
     st.write("")
@@ -937,7 +937,7 @@ def render_home():
         '<span style="color:#9FB4BA;font-size:0.85rem;">3 synthetic sample studies are bundled '
         'in the viewer if you don\'t have a .dcm file to hand. Use synthetic or public data only.</span></div>',
         unsafe_allow_html=True)
-    st.button("Start →", on_click=go, args=("viewer",))
+   # st.button("Start →", on_click=go, args=("viewer",))
 
 
 def render_viewer():
@@ -990,7 +990,7 @@ def render_viewer():
         if ds is None:
             st.markdown('<div style="display:flex;align-items:center;justify-content:center;height:400px;'
                         'border:1px solid #17323F;border-radius:12px;color:#8FA3AA;">'
-                        'No study loaded yet — upload a file or pick a sample on the left.</div>',
+                        'No study loaded yet, upload a file or pick a sample on the left.</div>',
                         unsafe_allow_html=True)
             return
 
