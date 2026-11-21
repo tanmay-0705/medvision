@@ -16,7 +16,6 @@ import numpy as np
 import streamlit as st
 from PIL import Image
 
-# Must be the first Streamlit command.
 st.set_page_config(page_title="MedVisionAI", layout="wide", page_icon="")
 
 APP_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -26,7 +25,7 @@ try:
     load_dotenv(os.path.join(APP_DIR, ".env"))
 except ImportError:  # python-dotenv is optional (e.g. in the cloud, env vars are set directly)
     pass
-
+    
 import pydicom
 from pydicom.dataset import FileDataset, FileMetaDataset
 from pydicom.uid import ExplicitVRLittleEndian, SecondaryCaptureImageStorage, generate_uid
